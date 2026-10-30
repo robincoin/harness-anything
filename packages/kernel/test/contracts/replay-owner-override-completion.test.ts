@@ -1,3 +1,4 @@
+// harness-test-tier: contract
 import assert from "node:assert/strict";
 import test from "node:test";
 import { lifecycleFixture } from "../store/task-lifecycle-fixture.ts";
@@ -5,6 +6,7 @@ import { reduceTaskEvent } from "../../src/domain/task-lifecycle-replay.ts";
 import { emptyTaskLifecycleSnapshot } from "../../src/domain/task-lifecycle.contract.ts";
 import { submissionDigest } from "../../src/domain/execution.ts";
 import { reviewDigest } from "../../src/domain/review.ts";
+import { closeoutReadiness } from "../../src/domain/closeout-readiness.ts";
 import type { TaskEventV1 } from "../../src/domain/task-lifecycle-event.ts";
 
 // A cut whose changes_requested verdict the owner disposed (review-consent override) completes
@@ -13,33 +15,56 @@ function overriddenCut(withDisposition: boolean) {
   const { events } = lifecycleFixture();
   const completed = events.at(-1)! as TaskEventV1;
   assert.equal(completed.type, "task_completed");
-  const before = events.slice(0, -1).reduce(reduceTaskEvent, emptyTaskLifecycleSnapshot());
-  const current = before.executions.at(-1)!;
-  const review = { ...before.reviews.at(-1)!, verdict: "changes_requested" as const };
-  const snapshot = {
-    ...before,
-    reviews: [...before.reviews.slice(0, -1), review],
-    consents: before.consents.map((consent) =>
-      consent.reviewId === review.reviewId ? { ...consent, reviewDigest: reviewDigest(review) } : consent,
-    ),
-    reviewDispositions: withDisposition
+  const reviewEvent = events.at(-3)! as Extract<TaskEventV1, { type: "review_recorded" }>;
+  const consentEvent = events.at(-2)! as Extract<TaskEventV1, { type: "review_consent_recorded" }>;
+  const review = { ...reviewEvent.payload.review, verdict: "changes_requested" as const };
+  const current = reviewEvent.payload.execution;
+  const digest = submissionDigest(current.submission!);
+  const disposition = {
+    schema: "review-disposition/v1" as const,
+    dispositionId: "disposition-override",
+    taskId: current.taskId,
+    executionId: current.executionId,
+    iteration: current.iteration,
+    submissionDigest: digest,
+    disposedReviewIds: [review.reviewId],
+    rationale: "Owner accepts the cut over the requested changes.",
+    actor: completed.actor,
+    source: completed.source,
+    disposedAt: consentEvent.occurredAt,
+  };
+  const stream = [
+    ...events.slice(0, -3),
+    { ...reviewEvent, payload: { ...reviewEvent.payload, review } },
+    ...(withDisposition
       ? [
           {
-            schema: "review-disposition/v1" as const,
-            dispositionId: "disposition-override",
-            taskId: current.taskId,
-            executionId: current.executionId,
-            iteration: current.iteration,
-            submissionDigest: submissionDigest(current.submission!),
-            disposedReviewIds: [review.reviewId],
-            rationale: "Owner accepts the cut over the requested changes.",
-            actor: completed.actor,
-            source: completed.source,
-            disposedAt: completed.occurredAt,
+            ...consentEvent,
+            type: "review_consent_overridden" as const,
+            payload: {
+              ...consentEvent.payload,
+              review,
+              consent: { ...consentEvent.payload.consent, reviewDigest: reviewDigest(review) },
+              disposition,
+            },
           },
         ]
-      : [],
-  };
+      : [
+          {
+            ...consentEvent,
+            payload: {
+              ...consentEvent.payload,
+              review,
+              consent: { ...consentEvent.payload.consent, reviewDigest: reviewDigest(review) },
+            },
+          },
+        ]),
+  ] as TaskEventV1[];
+  const snapshot = stream.reduce(reduceTaskEvent, emptyTaskLifecycleSnapshot());
+  assert.equal(
+    closeoutReadiness(snapshot, undefined, completed.payload.closeoutGates).readiness,
+    withDisposition ? "ready" : "incomplete",
+  );
   return { snapshot, completed };
 }
 
