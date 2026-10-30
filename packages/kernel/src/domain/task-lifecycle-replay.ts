@@ -2,7 +2,7 @@ import { replayGateRunChange } from "./gate-run-publication.ts";
 import { executionAnnotationKinds, isNativeExecution, submissionDigest, submissionId } from "./execution.ts";
 import type { ExecutionAnnotationKind, ExecutionAnnotationV1, ExecutionV1, LeaseV1 } from "./execution.ts";
 import { reviewDigest } from "./review.ts";
-import { isReviewDispositionEligible } from "./review-consent-validity.ts";
+import { disposedReviewIdsForSubmission, isReviewDispositionEligible } from "./review-consent-validity.ts";
 import { currentTaskForWrite, type ActorAxes, type ContractValidationIssue } from "./task.ts";
 import { validateTaskGraph } from "./task-graph.ts";
 import { isNonEmptyString } from "./write-chain.contract.ts";
@@ -918,7 +918,14 @@ function acceptedCompletionWitnesses(
           snapshot.reviews.some(
             (review) =>
               review.reviewId === consent.reviewId &&
-              review.verdict === "approved" &&
+              // Same standard as the consent command: a changes-requested verdict the owner disposed
+              // against this cut carries consent exactly like an approved one.
+              (review.verdict === "approved" ||
+                (review.verdict === "changes_requested" &&
+                  disposedReviewIdsForSubmission(
+                    snapshot.reviewDispositions ?? [],
+                    submissionDigest(current.submission!),
+                  ).has(review.reviewId))) &&
               consent.reviewDigest === reviewDigest(review) &&
               consent.contentDigest === review.contentDigest,
           ),
